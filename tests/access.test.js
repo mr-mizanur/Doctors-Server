@@ -18,7 +18,7 @@ test("protected REST API rejects anonymous and regular user sessions", async () 
       if (String(input).includes("/api/auth/get-session"))
         return new Response(JSON.stringify({
           session: { id: "test-session-id" },
-          user: { email: "member@example.com", role: "user" }
+          user: { id: "test-user-id", email: "member@example.com", role: "user" }
         }), { status: 200, headers: { "content-type": "application/json" } });
       return originalFetch(input, options);
     };
@@ -38,7 +38,7 @@ test("protected REST API rejects anonymous and regular user sessions", async () 
       if (String(input).includes("/api/auth/get-session"))
         return new Response(JSON.stringify({
           session: { id: "legacy-session-id" },
-          user: { email: "legacy@example.com" }
+          user: { id: "legacy-user-id", email: "legacy@example.com" }
         }), { status: 200, headers: { "content-type": "application/json" } });
       return originalFetch(input, options);
     };

@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const { MongoClient } = require('mongodb');
+const { MongoClient, ObjectId } = require('mongodb');
 const { HttpError, objectId, pagination, escapeRegex, searchTerm, dateFilter, doctorFields, patientFields } = require('./src/utils');
 
 const app = express();
@@ -94,7 +94,7 @@ app.use('/api', asyncHandler(async (req, res, next) => {
   let session;
   try { session = await sessionResponse.json(); }
   catch { return res.status(502).json({ error: 'Authentication service returned an invalid response' }); }
-  if (!session?.session?.id || !session?.user?.email)
+  if (!session?.session?.id || !session?.user?.id || !session?.user?.email)
     return res.status(401).json({ error: 'Please sign in again' });
   req.authUser = session.user;
   next();
@@ -105,9 +105,12 @@ app.use('/api', asyncHandler(async (req, res, next) => {
   // This immediately reflects an administrator promoting/revoking an account in Atlas.
   const email = req.authUser?.email?.toLowerCase();
   if (!email || typeof email !== 'string') return res.status(401).json({ error: 'Invalid user session' });
+  const id = String(req.authUser.id);
+  const ids = [{ _id: id }, { id }];
+  if (/^[a-f0-9]{24}$/i.test(id)) ids.push({ _id: new ObjectId(id) });
   const dbUser = await collections.users.findOne(
-    { email },
-    { projection: { role: 1, email: 1 } }
+    { email, $or: ids },
+    { projection: { role: 1 } }
   );
   if (!dbUser || dbUser.role !== 'admin')
     return res.status(403).json({ error: 'Administrator role required. Please contact the administrator.' });

@@ -18,4 +18,5 @@ jobs:
       - run: npm ci
       - run: node --check index.js
       - run: node --check src/utils.js
+      - run: node --check scripts/migrate.js
       - run: npm test

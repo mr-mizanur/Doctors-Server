@@ -22,6 +22,22 @@ FRONTEND_URL=http://localhost:3000
 
 Never commit the real MongoDB connection string or Better Auth credentials.
 
+## Existing data migration
+
+The old API stored doctors and patients without normalized search fields, and some existing accounts might have no `role`. After backing up the MongoDB database, inspect the changes with:
+
+```bash
+npm run migrate:dry
+```
+
+If the preview is correct, perform the changes intentionally:
+
+```bash
+npm run migrate:apply
+```
+
+The migration sets only **missing** roles to `user` (it never grants `admin`) and fills missing search fields. It does not delete records or invent doctor assignments for old patients.
+
 ## Role-based authentication
 
 - Registered accounts default to `role: "user"` (not an admin).
