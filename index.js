@@ -18,7 +18,7 @@ async function getDb() {
       const doctors = db.collection('doctors');
       const patients = db.collection('patients');
       const users = db.collection('user');
-      // Index builds are scheduled separately so a temporary index issue does not break stats.
+    
       Promise.all([
         doctors.createIndexes([
           { key: { searchName: 1, _id: 1 }, name: 'doctor_name' },
@@ -39,13 +39,10 @@ async function getDb() {
   return dbPromise;
 }
 const asyncHandler = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
-// Test seam: API integration tests provide in-memory collection implementations.
 app.locals.getDb = getDb;
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
 
-// All Express requests independently verify the Better Auth cookie against
-// Next.js. This works with the existing PORT/MONGODB_URI-only server .env.
 app.get('/', (_req, res) => res.status(200).json({
   name: 'Doctors Tracker REST API',
   message: 'Welcome to Doctors Tracker — a secure Express.js and MongoDB service.',
@@ -62,7 +59,6 @@ app.get('/', (_req, res) => res.status(200).json({
   security: 'Protected APIs require an authenticated administrator (MongoDB user.role=admin).'
 }));
 app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'doctors-tracker-api' }));
-// Standalone MongoDB readiness check: safe status only, never outputs credentials.
 app.get('/health/db', asyncHandler(async (_req, res) => {
   try {
     const { db } = await app.locals.getDb();
@@ -101,8 +97,6 @@ app.use('/api', asyncHandler(async (req, res, next) => {
 }));
 app.use('/api', asyncHandler(async (req, res, next) => {
   const collections = await app.locals.getDb();
-  // NEVER trust a role claim from a session cookie; MongoDB 'user' is authoritative.
-  // This immediately reflects an administrator promoting/revoking an account in Atlas.
   const email = req.authUser?.email?.toLowerCase();
   if (!email || typeof email !== 'string') return res.status(401).json({ error: 'Invalid user session' });
   const id = String(req.authUser.id);
