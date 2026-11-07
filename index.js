@@ -40,7 +40,6 @@ async function getDb() {
 const asyncHandler = (handler) => (req, res, next) => Promise.resolve(handler(req, res)).catch(next);
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
-const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
 
 // All Express requests independently verify the Better Auth cookie against
 // Next.js. This works with the existing PORT/MONGODB_URI-only server .env.
@@ -77,8 +76,9 @@ app.use('/api', asyncHandler(async (req, res, next) => {
   const session = await sessionResponse.json();
   if (!session?.session?.id || !session?.user?.email)
     return res.status(401).json({ error: 'Please sign in again' });
-  if (adminEmails.length && !adminEmails.includes(session.user.email.toLowerCase()))
-    return res.status(403).json({ error: 'This account is not authorized as an administrator' });
+  // Defense in depth: database-backed role is enforced independently by Express.
+  if (session.user.role !== 'admin')
+    return res.status(403).json({ error: 'Administrator role required' });
 
   req.authUser = session.user;
   next();
