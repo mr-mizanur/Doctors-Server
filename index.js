@@ -1,7 +1,6 @@
 require('dotenv').config();
 const express = require('express');
 const { MongoClient } = require('mongodb');
-const { timingSafeEqual } = require('crypto');
 const { HttpError, objectId, pagination, escapeRegex, searchTerm, dateFilter, doctorFields, patientFields } = require('./src/utils');
 
 const app = express();
@@ -38,18 +37,40 @@ async function getDb() {
   return dbPromise;
 }
 const asyncHandler = (handler) => (req, res, next) => Promise.resolve(handler(req, res)).catch(next);
-const validKey = (supplied, expected) => {
-  if (typeof supplied !== 'string' || typeof expected !== 'string' || expected.length < 32) return false;
-  const a = Buffer.from(supplied), b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a,b);
-};
 
+const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+
+// All Express requests independently verify the Better Auth cookie against
+// Next.js. This works with the existing PORT/MONGODB_URI-only server .env.
 app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'doctors-tracker-api' }));
-app.use('/api', (req, res, next) => {
-  if (!validKey(req.get('x-internal-key'), process.env.INTERNAL_API_KEY))
-    return res.status(401).json({ error: 'Unauthorized' });
+app.use('/api', asyncHandler(async (req, res, next) => {
+  const cookie = req.get('cookie');
+  if (!cookie) return res.status(401).json({ error: 'Please sign in to continue' });
+
+  let sessionResponse;
+  try {
+    sessionResponse = await fetch(FRONTEND_URL + '/api/auth/get-session', {
+      method: 'GET',
+      headers: { Cookie: cookie, Accept: 'application/json' },
+      cache: 'no-store',
+      redirect: 'error',
+      signal: AbortSignal.timeout(8000)
+    });
+  } catch (error) {
+    console.error('Auth service is unavailable:', error.message);
+    return res.status(503).json({ error: 'Authentication service is unavailable. Start the frontend application.' });
+  }
+  if (!sessionResponse.ok) return res.status(401).json({ error: 'Session verification failed' });
+  const session = await sessionResponse.json();
+  if (!session?.session?.id || !session?.user?.email)
+    return res.status(401).json({ error: 'Please sign in again' });
+  if (adminEmails.length && !adminEmails.includes(session.user.email.toLowerCase()))
+    return res.status(403).json({ error: 'This account is not authorized as an administrator' });
+
+  req.authUser = session.user;
   next();
-});
+}));
 app.use('/api', asyncHandler(async (req, _res, next) => {
   req.collections = await getDb();
   next();

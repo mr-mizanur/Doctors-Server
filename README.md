@@ -1,38 +1,59 @@
-# Doctors Tracker — REST API
+# Doctors Tracker — Express API
 
-Secure standalone Express 5 / MongoDB service for [Doctors Tracker](https://github.com/mr-mizanur/Doctors-Tracker). All /api routes require the secret server-to-server `x-internal-key` header. Do **not** call this API directly from the browser; Next.js validates Better Auth sessions and forwards authorized admin requests through its server-only gateway.
+This secure standalone Express + MongoDB service powers the [Next.js Doctors Tracker frontend](https://github.com/mr-mizanur/Doctors-Tracker). Manage doctors and their associated patients, search/filter/paginate, and retrieve aggregated dashboard analytics.
 
-## Setup
+## Local setup
 
-1. Install Node.js 20+ and MongoDB Atlas (or local MongoDB).
-2. Run `npm ci` (or `npm install` if regenerating the lockfile).
-3. Copy `.env.example` to `.env` and set `MONGODB_URI`, `MONGODB_DB`, and `INTERNAL_API_KEY` (at least 32 random characters).
-4. Run `npm run dev`. Test `GET http://localhost:5000/health`.
-5. Run `npm test` for input-validation tests.
-6. Set `NEXT_PUBLIC_API_URL`? **No**: configure the frontend's server-only `BACKEND_URL=http://localhost:5000` and `BACKEND_API_KEY` to the same value as `INTERNAL_API_KEY`.
+1. Install Node.js 20+ and configure a MongoDB Atlas database.
+2. Run `npm install`.
+3. Copy `.env.example` to `.env`. Set `MONGODB_URI` and `PORT=5000`. The frontend URL defaults to `http://localhost:3000`.
+4. Run `npm run dev` or `npm start`; `GET http://localhost:5000/health` should return status `ok`.
+5. In another terminal, run the frontend with its own `.env.local`.
+6. Run `npm test` for input validation tests.
 
-## Architecture
+## Environment
 
-Browser → Better Auth session (Next.js) → /api/backend/* (Next.js server verifies admin allowlist) → x-internal-key → Express → MongoDB collections doctors/patients. The API key is never made public. Deploying the two apps to different origins is supported because all browser calls stay on the Next.js origin.
+```dotenv
+PORT=5000
+MONGODB_URI=mongodb+srv://<db-user>:<db-password>@<cluster>.mongodb.net/doctor-tracker?retryWrites=true&w=majority
+MONGODB_DB=doctor-tracker
+FRONTEND_URL=http://localhost:3000
+# Optional. Comma-separated permitted login addresses. Recommended in production.
+# ADMIN_EMAILS=admin@example.com
+```
 
-## Endpoints
+Never commit the real MongoDB connection string or Better Auth credentials.
 
-Public: `GET /health`. Authenticated internal API:
-- `GET, POST /api/doctors`; `GET, PUT, DELETE /api/doctors/:id`
-- `GET, POST /api/patients`; `PUT, DELETE /api/patients/:id`
-- `GET /api/stats`
+## Security and architecture
 
-List query parameters: `page` (>=1), `limit` (1–50), `search` (case-insensitive **prefix**), `dateFrom`/`dateTo` (YYYY-MM-DD UTC). Doctors: `specialty`, `hospital`; patients: `condition`, `doctorId`. Responses return `{items,pagination:{page,limit,total,pages}}`. Patients must reference an existing doctor. Doctor deletion is blocked (409) when patients still reference that doctor.
+Browser → Next.js (Better Auth login) → Next.js same-origin API proxy → Express REST API → MongoDB.
 
-## Technical decisions
+**Every** Express `/api` call verifies the forwarded Better Auth session cookie by requesting the frontend `/api/auth/get-session` endpoint. It does not trust an unsanitized browser-supplied user identifier and denies requests without a valid session. If you set `ADMIN_EMAILS`, the server additionally restricts access to those emails. Set the same allowlist in the frontend. The cookie is sent only to the configured frontend auth service; never log cookies.
 
-1. **Gateway + shared service secret:** Keeping Better Auth in Next.js avoids sending browser cookies to a different-origin Express service. Each data route checks the user session and admin email allowlist before forwarding with a server-only 32+-character key. The Express service rejects requests without that key. Rotate both secrets together.
-2. **Indexed normalized prefix search and server pagination:** Doctors store `searchName`/`searchHospital` and patients store `searchName` for escaped anchored regex, which can use B-tree prefix indexes. Filtering and pagination run in MongoDB with stable date/_id sorting; counts and chart series use aggregation instead of fetching every patient record. These are prefix searches rather than arbitrary substring matching.
+The two apps must be running together; a backend request made before the frontend is available will return a 503 authentication-service error. For production, change `FRONTEND_URL` to the deployed frontend's HTTPS origin and `BACKEND_URL` in the frontend to the server's HTTPS origin. Use HTTPS, trusted deployment configuration, and least-privilege DB access.
 
-## Existing-data note
+## REST endpoints
 
-Records created with the previous server do not have normalized search fields or doctorId. Existing records remain visible in unfiltered lists; those records will not match indexed search until migrated. Old patients remain unassigned until associated with a doctor. Back up your database before migrations.
+All endpoints except `/health` require a valid session.
 
-## Security
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/doctors` | List doctors |
+| POST | `/api/doctors` | Create doctor |
+| GET | `/api/doctors/:id` | Doctor detail and patient count |
+| PUT | `/api/doctors/:id` | Edit doctor |
+| DELETE | `/api/doctors/:id` | Delete only when no associated patients |
+| GET | `/api/patients` | List patients |
+| POST | `/api/patients` | Add patient under a doctor |
+| PUT | `/api/patients/:id` | Edit patient |
+| DELETE | `/api/patients/:id` | Delete patient |
+| GET | `/api/stats` | Totals, daily trend and patients per doctor |
 
-Set a long, random `INTERNAL_API_KEY`; restrict the API deployment at the network edge when possible. Do not store real patient health records unless you have appropriate consent, access controls, retention and compliance procedures. The application is a project demonstration, not a production clinical record system.
+List query parameters: `search` (case-insensitive **prefix**), `dateFrom`, `dateTo` (`YYYY-MM-DD`, UTC), `page` (>=1), `limit` (1–50). Doctors support `specialty` and `hospital`. Patients support `condition` and `doctorId`. Lists return `{items,pagination:{page,limit,total,pages}}`.
+
+## Database design and technical decisions
+
+- **Independent auth verification** rather than a shared static API secret: the existing two-process setup can run with the supplied backend environment. The backend checks each user session through Better Auth before executing database operations; Express never accepts anonymous CRUD.
+- **Server-side filtering and indexing:** normalized searchable fields plus escaped anchored regex enable B-tree prefix lookup. Compound indexes optimize date, condition and doctor joins. Pagination and analytics use database queries/aggregation rather than loading all rows into React. Top-doctor counts are joined in MongoDB.
+
+Legacy data from the previous server can lack `searchName` and `doctorId`; back it up and migrate these fields before relying on search or doctor-linked analytics. Protect patient information; this demo is not a clinical-record compliance solution.
