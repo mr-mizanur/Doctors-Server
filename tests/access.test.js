@@ -4,6 +4,8 @@ const app = require("../index");
 
 test("protected REST API rejects anonymous and regular user sessions", async () => {
   const originalFetch = global.fetch;
+  const originalDb = app.locals.getDb;
+  app.locals.getDb = async () => ({users:{findOne:async()=>({role:"user"})}});
   const server = app.listen(0);
   const base = "http://127.0.0.1:" + server.address().port;
   try {
@@ -44,6 +46,7 @@ test("protected REST API rejects anonymous and regular user sessions", async () 
     assert.equal(res.status,403);
   } finally {
     global.fetch = originalFetch;
+    app.locals.getDb = originalDb;
     await new Promise((resolve,reject)=>server.close(err=>err?reject(err):resolve()));
   }
 });
