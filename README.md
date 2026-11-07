@@ -26,7 +26,7 @@ Never commit the real MongoDB connection string or Better Auth credentials.
 
 - Registered accounts default to `role: "user"` (not an admin).
 - Both the Next.js dashboard gateway and Express require `role === "admin"`.
-- A signed-in non-admin receives HTTP `403` on every `/api/*` route.
+- A signed-in non-admin receives HTTP `403` on every `/api/*` route. MongoDB is the source of truth for roles.
 - Promote one account via the `doctor-tracker` database, Better Auth `user` collection: `db.user.updateOne({email:"someone@example.com"}, {$set:{role:"admin"}})`.
 - Once promoted, the user can refresh their `/pending` page to check access; signing out and back in also refreshes session state.
 - Never create a public endpoint where users can set their own roles.
@@ -35,7 +35,7 @@ Never commit the real MongoDB connection string or Better Auth credentials.
 
 Browser → Next.js (Better Auth login) → Next.js same-origin API proxy → Express REST API → MongoDB.
 
-**Every** Express `/api` call verifies the forwarded Better Auth session cookie by requesting the frontend `/api/auth/get-session` endpoint. It does not trust an unsanitized browser-supplied user identifier and denies requests without a valid session. Express also requires `session.user.role === 'admin'` for **every** REST request. New registrations receive the server-owned `user` role; a database administrator must explicitly promote the account to `admin` in the Better Auth `user` collection. The client cannot set or change this field. The cookie is sent only to the configured frontend auth service; never log cookies.
+**Every** Express `/api` call verifies the forwarded Better Auth session cookie by requesting the frontend `/api/auth/get-session` endpoint. It does not trust an unsanitized browser-supplied user identifier and denies requests without a valid session. Express independently looks up the authenticated user's **current** role in the MongoDB `user` collection for **every** REST request. `session.user.role` is not trusted for authorization; role promotions and demotions take effect immediately after the next request. New registrations receive the server-owned `user` role; a database administrator must explicitly promote the account to `admin` in the Better Auth `user` collection. The client cannot set or change this field. The cookie is sent only to the configured frontend auth service; never log cookies.
 
 The two apps must be running together; a backend request made before the frontend is available will return a 503 authentication-service error. For production, change `FRONTEND_URL` to the deployed frontend's HTTPS origin and `BACKEND_URL` in the frontend to the server's HTTPS origin. Use HTTPS, trusted deployment configuration, and least-privilege DB access.
 

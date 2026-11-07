@@ -17,6 +17,7 @@ async function getDb() {
       const db = client.db(process.env.MONGODB_DB || 'doctor-tracker');
       const doctors = db.collection('doctors');
       const patients = db.collection('patients');
+      const users = db.collection('user');
       // Index builds are scheduled separately so a temporary index issue does not break stats.
       Promise.all([
         doctors.createIndexes([
@@ -32,22 +33,39 @@ async function getDb() {
           { key: { createdAt: -1 }, name: 'patient_created' }
         ])
       ]).catch(error => console.error('MongoDB index creation warning:', error.codeName || error.name || 'unknown'));
-      return { db, doctors, patients };
+      return { db, doctors, patients, users };
     })().catch((error) => { dbPromise = null; throw error; });
   }
   return dbPromise;
 }
-const asyncHandler = (handler) => (req, res, next) => Promise.resolve(handler(req, res)).catch(next);
+const asyncHandler = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+// Test seam: API integration tests provide in-memory collection implementations.
+app.locals.getDb = getDb;
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
 
 // All Express requests independently verify the Better Auth cookie against
 // Next.js. This works with the existing PORT/MONGODB_URI-only server .env.
+app.get('/', (_req, res) => res.status(200).json({
+  name: 'Doctors Tracker REST API',
+  message: 'Welcome to Doctors Tracker — a secure Express.js and MongoDB service.',
+  version: '1.2.0',
+  status: 'running',
+  documentation: 'https://github.com/mr-mizanur/Doctors-Tracker-Server',
+  routes: {
+    public: ['GET /', 'GET /health', 'GET /health/db'],
+    protected: ['GET /api/stats', 'GET /api/doctors', 'POST /api/doctors',
+      'GET /api/doctors/:id', 'PUT /api/doctors/:id', 'DELETE /api/doctors/:id',
+      'GET /api/patients', 'POST /api/patients',
+      'PUT /api/patients/:id', 'DELETE /api/patients/:id']
+  },
+  security: 'Protected APIs require an authenticated administrator (MongoDB user.role=admin).'
+}));
 app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'doctors-tracker-api' }));
 // Standalone MongoDB readiness check: safe status only, never outputs credentials.
 app.get('/health/db', asyncHandler(async (_req, res) => {
   try {
-    const { db } = await getDb();
+    const { db } = await app.locals.getDb();
     await db.command({ ping: 1 });
     res.json({ status: 'ok', database: 'connected' });
   } catch (error) {
@@ -73,18 +91,28 @@ app.use('/api', asyncHandler(async (req, res, next) => {
     return res.status(503).json({ error: 'Authentication service is unavailable. Start the frontend application.' });
   }
   if (!sessionResponse.ok) return res.status(401).json({ error: 'Session verification failed' });
-  const session = await sessionResponse.json();
+  let session;
+  try { session = await sessionResponse.json(); }
+  catch { return res.status(502).json({ error: 'Authentication service returned an invalid response' }); }
   if (!session?.session?.id || !session?.user?.email)
     return res.status(401).json({ error: 'Please sign in again' });
-  // Defense in depth: database-backed role is enforced independently by Express.
-  if (session.user.role !== 'admin')
-    return res.status(403).json({ error: 'Administrator role required' });
-
   req.authUser = session.user;
   next();
 }));
-app.use('/api', asyncHandler(async (req, _res, next) => {
-  req.collections = await getDb();
+app.use('/api', asyncHandler(async (req, res, next) => {
+  const collections = await app.locals.getDb();
+  // NEVER trust a role claim from a session cookie; MongoDB 'user' is authoritative.
+  // This immediately reflects an administrator promoting/revoking an account in Atlas.
+  const email = req.authUser?.email?.toLowerCase();
+  if (!email || typeof email !== 'string') return res.status(401).json({ error: 'Invalid user session' });
+  const dbUser = await collections.users.findOne(
+    { email },
+    { projection: { role: 1, email: 1 } }
+  );
+  if (!dbUser || dbUser.role !== 'admin')
+    return res.status(403).json({ error: 'Administrator role required. Please contact the administrator.' });
+
+  req.collections = collections;
   next();
 }));
 
@@ -236,7 +264,7 @@ app.use((err, _req, res, _next) => {
   if (err instanceof HttpError) return res.status(err.status).json({error:err.message});
   if (err?.status === 413) return res.status(413).json({error:'Request too large'});
   console.error('API failure:', err?.name || 'Error', err?.codeName || err?.code || '', err?.message || '');
-  if (!client || err?.name?.includes('Mongo') || err?.codeName || err?.code === 'ECONNREFUSED')
+  if (!client || err?.name?.includes('Mongo') || err?.name === 'MongoNetworkTimeoutError' || err?.codeName || err?.code === 'ECONNREFUSED')
     return res.status(503).json({error:'MongoDB unavailable. Verify .env, MongoDB Atlas IP allowlist, database credentials and permissions. See server terminal logs.'});
   res.status(500).json({error:'Internal server error. Inspect the Express server terminal for the underlying cause.'});
 });
