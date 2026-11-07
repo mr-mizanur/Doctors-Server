@@ -32,7 +32,7 @@ async function getDb() {
           { key: { createdAt: -1 }, name: 'patient_created' }
         ])
       ]).catch(error => console.error('MongoDB index creation warning:', error.codeName || error.name || 'unknown'));
-      return { doctors, patients };
+      return { db, doctors, patients };
     })().catch((error) => { dbPromise = null; throw error; });
   }
   return dbPromise;
@@ -48,8 +48,8 @@ app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'doctors-tra
 // Standalone MongoDB readiness check: safe status only, never outputs credentials.
 app.get('/health/db', asyncHandler(async (_req, res) => {
   try {
-    const { doctors } = await getDb();
-    await doctors.db.command({ ping: 1 });
+    const { db } = await getDb();
+    await db.command({ ping: 1 });
     res.json({ status: 'ok', database: 'connected' });
   } catch (error) {
     console.error('MongoDB health check failed:', error.codeName || error.message);
