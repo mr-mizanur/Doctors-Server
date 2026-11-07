@@ -7,7 +7,7 @@ const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '64kb' }));
 app.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
-const client = process.env.MONGODB_URI ? new MongoClient(process.env.MONGODB_URI, { maxPoolSize: 10 }) : null;
+const client = process.env.MONGODB_URI ? new MongoClient(process.env.MONGODB_URI, { maxPoolSize: 10, serverSelectionTimeoutMS: 8000, connectTimeoutMS: 8000 }) : null;
 let dbPromise;
 async function getDb() {
   if (!client) throw new Error('MONGODB_URI is missing');
@@ -17,7 +17,8 @@ async function getDb() {
       const db = client.db(process.env.MONGODB_DB || 'doctor-tracker');
       const doctors = db.collection('doctors');
       const patients = db.collection('patients');
-      await Promise.all([
+      // Index builds are scheduled separately so a temporary index issue does not break stats.
+      Promise.all([
         doctors.createIndexes([
           { key: { searchName: 1, _id: 1 }, name: 'doctor_name' },
           { key: { searchHospital: 1, _id: 1 }, name: 'doctor_hospital' },
@@ -30,7 +31,7 @@ async function getDb() {
           { key: { condition: 1, createdAt: -1 }, name: 'patient_condition_date' },
           { key: { createdAt: -1 }, name: 'patient_created' }
         ])
-      ]);
+      ]).catch(error => console.error('MongoDB index creation warning:', error.codeName || error.name || 'unknown'));
       return { doctors, patients };
     })().catch((error) => { dbPromise = null; throw error; });
   }
@@ -44,6 +45,17 @@ const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(x => x.trim(
 // All Express requests independently verify the Better Auth cookie against
 // Next.js. This works with the existing PORT/MONGODB_URI-only server .env.
 app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'doctors-tracker-api' }));
+// Standalone MongoDB readiness check: safe status only, never outputs credentials.
+app.get('/health/db', asyncHandler(async (_req, res) => {
+  try {
+    const { doctors } = await getDb();
+    await doctors.db.command({ ping: 1 });
+    res.json({ status: 'ok', database: 'connected' });
+  } catch (error) {
+    console.error('MongoDB health check failed:', error.codeName || error.message);
+    res.status(503).json({ status: 'unavailable', database: 'disconnected', help: 'Check MONGODB_URI, MongoDB Atlas Network Access IP allowlist, database user permissions, and server logs.' });
+  }
+}));
 app.use('/api', asyncHandler(async (req, res, next) => {
   const cookie = req.get('cookie');
   if (!cookie) return res.status(401).json({ error: 'Please sign in to continue' });
@@ -173,42 +185,60 @@ app.delete('/api/patients/:id', asyncHandler(async (req,res) => {
   if (!result.deletedCount) throw new HttpError(404, 'Patient not found');
   res.json({success:true});
 }));
+// Counters must continue working even if a legacy record breaks optional chart aggregation.
 app.get('/api/stats', asyncHandler(async (req,res) => {
-  const {doctors,patients} = req.collections;
+  const {doctors, patients} = req.collections;
+  const [totalDoctors, totalPatients, unassignedPatients] = await Promise.all([
+    doctors.countDocuments({}),
+    patients.countDocuments({}),
+    patients.countDocuments({$or: [{doctorId: {$exists: false}}, {doctorId: null}]})
+  ]);
   const today = new Date();
   const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 13));
-  const [totalDoctors,totalPatients,unassignedPatients,counts,history] = await Promise.all([
-    doctors.countDocuments(), patients.countDocuments(),
-    patients.countDocuments({$or:[{doctorId:{$exists:false}},{doctorId:null}]}),
+  const [countsResult, historyResult] = await Promise.allSettled([
     patients.aggregate([
       {$match:{doctorId:{$type:'objectId'}}},
-      {$group:{_id:'$doctorId',count:{$sum:1}}},
-      {$sort:{count:-1}},
-      {$limit:8},
+      {$group:{_id:'$doctorId', count:{$sum:1}}},
+      {$sort:{count:-1}}, {$limit:8},
       {$lookup:{from:'doctors',localField:'_id',foreignField:'_id',as:'doctor'}},
       {$unwind:'$doctor'},
-      {$project:{_id:0,doctorId:'$_id',name:'$doctor.name',count:1}}
+      {$project:{_id:0, doctorId:'$_id', name:'$doctor.name', count:1}}
     ]).toArray(),
     patients.aggregate([
-      {$match:{createdAt:{$gte:start}}},
-      {$group:{_id:{$dateToString:{format:'%Y-%m-%d',date:'$createdAt',timezone:'UTC'}},count:{$sum:1}}},
+      // Legacy records may contain an ISO string or an invalid createdAt value.
+      {$set:{parsedCreatedAt:{$convert:{input:'$createdAt',to:'date',onError:null,onNull:null}}}},
+      {$match:{parsedCreatedAt:{$gte:start}}},
+      {$group:{_id:{$dateToString:{format:'%Y-%m-%d',date:'$parsedCreatedAt',timezone:'UTC'}}, count:{$sum:1}}},
       {$sort:{_id:1}}
     ]).toArray()
   ]);
+  const warnings = [];
+  if (countsResult.status === 'rejected') {
+    console.error('Stats patients-per-doctor aggregation failed:', countsResult.reason?.message || countsResult.reason);
+    warnings.push('Doctor workload chart is temporarily unavailable');
+  }
+  if (historyResult.status === 'rejected') {
+    console.error('Stats daily aggregation failed:', historyResult.reason?.message || historyResult.reason);
+    warnings.push('Daily patient chart is temporarily unavailable');
+  }
+  const counts = countsResult.status === 'fulfilled' ? countsResult.value : [];
+  const history = historyResult.status === 'fulfilled' ? historyResult.value : [];
   const dailyMap = new Map(history.map(x=>[x._id,x.count]));
   const dailyPatients = Array.from({length:14},(_,i)=>{
-    const date = new Date(start.getTime() + i*86400000).toISOString().slice(0,10);
+    const date = new Date(start.getTime()+i*86400000).toISOString().slice(0,10);
     return {date,count:dailyMap.get(date)||0};
   });
-  res.json({totalDoctors,totalPatients,unassignedPatients,patientsPerDoctor:counts,dailyPatients});
+  res.json({totalDoctors,totalPatients,unassignedPatients,patientsPerDoctor:counts,dailyPatients,analyticsWarnings:warnings});
 }));
 app.use('/api', (_req,res)=>res.status(404).json({error:'API route not found'}));
 app.use((err, _req, res, _next) => {
   if (err instanceof SyntaxError && err.status === 400) return res.status(400).json({error:'Invalid JSON'});
   if (err instanceof HttpError) return res.status(err.status).json({error:err.message});
   if (err?.status === 413) return res.status(413).json({error:'Request too large'});
-  console.error('API failure:', err?.message || err);
-  res.status(500).json({error:'Internal server error'});
+  console.error('API failure:', err?.name || 'Error', err?.codeName || err?.code || '', err?.message || '');
+  if (!client || err?.name?.includes('Mongo') || err?.codeName || err?.code === 'ECONNREFUSED')
+    return res.status(503).json({error:'MongoDB unavailable. Verify .env, MongoDB Atlas IP allowlist, database credentials and permissions. See server terminal logs.'});
+  res.status(500).json({error:'Internal server error. Inspect the Express server terminal for the underlying cause.'});
 });
 if (require.main === module && !process.env.VERCEL) {
   const port = Number(process.env.PORT || 5000);

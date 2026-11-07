@@ -57,3 +57,12 @@ List query parameters: `search` (case-insensitive **prefix**), `dateFrom`, `date
 - **Server-side filtering and indexing:** normalized searchable fields plus escaped anchored regex enable B-tree prefix lookup. Compound indexes optimize date, condition and doctor joins. Pagination and analytics use database queries/aggregation rather than loading all rows into React. Top-doctor counts are joined in MongoDB.
 
 Legacy data from the previous server can lack `searchName` and `doctorId`; back it up and migrate these fields before relying on search or doctor-linked analytics. Protect patient information; this demo is not a clinical-record compliance solution.
+
+## Troubleshooting `/api/stats`
+
+- Open `http://localhost:5000/health` to see if Express is running.
+- Open `http://localhost:5000/health/db` to test MongoDB connectivity (this reports only connection status, not database contents).
+- A direct browser request to `/api/stats` **requires** a signed-in Better Auth session; otherwise 401 is expected. Use the Next.js dashboard or `http://localhost:3000/api/backend/stats` while signed in.
+- For 503 errors: check `MONGODB_URI` in the server's local `.env`, MongoDB Atlas Network Access allowed IPs, and the Atlas database user/password. Read the Express terminal for the actual error.
+- For index creation errors, the server now logs a warning and still performs the database queries; data analytics do not depend on indexes being built synchronously.
+- Dashboard daily analytics now handles old records with dates stored as ISO strings; one chart failure no longer blocks total counts.
